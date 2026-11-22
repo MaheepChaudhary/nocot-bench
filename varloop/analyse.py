@@ -5,8 +5,7 @@ NCRI 15.2 ladder with nocot.place (bootstrap 1000), and writes:
 
     results.csv   one row per setting, draw and scoring basis
     banks.csv     per-bank accuracy at p1 and p3 with a paired bootstrap CI
-    fig1.png      per-bank accuracy difference (p3 - p1), sorted, with CIs
-    fig2.png      NCRI at p1 and p3, all domains and without recheck_v2 + recon
+    (figures are made by followup.py)
 
 Two scoring bases are reported, because the code and AGENTS.md disagree:
     place_py   what nocot.place computes (it ignores the 0.20 cell rule)
@@ -29,21 +28,15 @@ sys.path.insert(0, os.getcwd())
 from nocot import grade as G          # noqa: E402  (repository code, unchanged)
 from nocot.place import rungs_from_rows  # noqa: E402
 
-import matplotlib                     # noqa: E402
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt       # noqa: E402
 
 OUT_DIR = "varloop"
 PLACEMENT_DIR = os.path.join(OUT_DIR, "placement")
 BOOTSTRAP = 1000
 SEED = 20261122
 SUBSET_DROP = ("recheck_v2", "recon")
-SETTINGS = ("p1", "p3")
-GRADED_DIRS = {1: "graded/{s}", 2: "graded_draw2/{s}"}
+SETTINGS = ("p1", "p2", "p3", "p4", "p5")   # missing settings are skipped
+GRADED_DIRS = {1: "graded/{s}", 2: "graded_draw2/{s}", 3: "graded_draw3/{s}"}
 
-# Reference palette (dataviz skill, categorical slots 1 and 2) and text inks.
-BLUE, ORANGE = "#2a78d6", "#eb6834"
-INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
 class GradedSetting:
@@ -295,80 +288,11 @@ class BankComparison:
         return [self.compare(b) for b in banks]
 
 
-class Figures:
-    """fig1 (per-bank differences) and fig2 (NCRI by setting)."""
-
-    @staticmethod
-    def _style(ax):
-        ax.set_facecolor(SURFACE)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color(GRID)
-        ax.tick_params(colors=INK_2, labelsize=9)
-
-    def fig1(self, bank_rows, path, prefix="", reading="floor reading"):
-        """prefix '' plots the floor columns; 'af_' the answer-first ones."""
-        diff, lo_key, hi_key = prefix + "diff", prefix + "ci_lo", prefix + "ci_hi"
-        rows = sorted(bank_rows, key=lambda r: r[diff])
-        fig, ax = plt.subplots(figsize=(8, 9), facecolor=SURFACE)
-        self._style(ax)
-        for i, r in enumerate(rows):
-            color = ORANGE if r["bank"] in SUBSET_DROP else BLUE
-            ax.plot([r[lo_key], r[hi_key]], [i, i], color=color, lw=2,
-                    solid_capstyle="round")
-            ax.plot(r[diff], i, "o", ms=8, color=color, mec=SURFACE, mew=2)
-        ax.axvline(0, color=INK_2, lw=1)
-        ax.set_yticks(range(len(rows)))
-        ax.set_yticklabels([f"{r['bank']}  (n={r['n']})" for r in rows], color=INK)
-        for label, r in zip(ax.get_yticklabels(), rows):
-            if r["bank"] in SUBSET_DROP:
-                label.set_fontweight("bold")
-        ax.grid(axis="x", color=GRID, lw=0.8)
-        ax.set_xlabel(f"accuracy difference, p3 − p1 ({reading})\n"
-                      "95% paired item bootstrap", color=INK_2)
-        ax.set_title(f"Per-bank accuracy, passes=3 minus passes=1\n"
-                     f"{reading}; orange = recheck_v2 and recon",
-                     color=INK, fontsize=11, loc="left")
-        fig.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-
-    def fig2(self, results, path):
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4.5), sharey=True, facecolor=SURFACE)
-        titles = {"place_py": "As computed by nocot.place\n(0.20 cell rule not applied)",
-                  "a101": "0.20 cell rule applied (AGENTS.md §4)\nboth settings UNRANKED"}
-        for ax, basis in zip(axes, ("place_py", "a101")):
-            self._style(ax)
-            for offset, setting, color in ((-0.12, "p1", BLUE), (0.12, "p3", ORANGE)):
-                row = results.find(setting, 1, basis)
-                for x, key in ((0, "_full"), (1, "_subset")):
-                    p = row[key]
-                    ax.plot([x + offset] * 2, [p["lo"], p["hi"]], color=color, lw=2,
-                            solid_capstyle="round")
-                    ax.plot(x + offset, p["ncri"], "o", ms=8, color=color,
-                            mec=SURFACE, mew=2, label=setting if x == 0 else None)
-                    ax.annotate(f"{p['ncri']:.1f}\n{p['domains']}", (x + offset, p["hi"]),
-                                textcoords="offset points", xytext=(0, 4), ha="center",
-                                fontsize=8, color=INK_2)
-            ax.set_xticks([0, 1])
-            ax.set_xticklabels(["all domains", "excl. recheck_v2 + recon"], color=INK)
-            ax.set_xlim(-0.5, 1.5)
-            ax.set_ylim(20, 68)
-            ax.grid(axis="y", color=GRID, lw=0.8)
-            ax.set_title(titles[basis], color=INK, fontsize=10, loc="left")
-        axes[0].set_ylabel("NCRI display (95% item bootstrap, draw 1)", color=INK_2)
-        axes[0].legend(frameon=False, labelcolor=INK, loc="lower left")
-        fig.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-
-
 def main():
     placer = Placer()
     results = ResultsTable(placer)
     graded = {}
-    for draw in (1, 2):
+    for draw in GRADED_DIRS:
         for setting in SETTINGS:
             g = GradedSetting(setting, draw)
             if not g.paths:
@@ -385,11 +309,6 @@ def main():
         writer.writeheader()
         writer.writerows(bank_rows)
 
-    figures = Figures()
-    figures.fig1(bank_rows, os.path.join(OUT_DIR, "fig1.png"))
-    figures.fig1(bank_rows, os.path.join(OUT_DIR, "fig1_answer_first.png"),
-                 prefix="af_", reading="answer-first, supplementary")
-    figures.fig2(results, os.path.join(OUT_DIR, "fig2.png"))
     for row in results.rows:
         print({k: v for k, v in row.items() if not k.startswith("_")})
 

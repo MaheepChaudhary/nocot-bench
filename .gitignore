@@ -46,3 +46,16 @@ runs_rejected/
 placement_*.json
 automation/page.html
 automation/open_requests.json
+
+# varloop study (passes=1 vs passes=3): rows, caches and per-run output stay
+# local, like runs/ and graded/ above. Only code, patches, notes.md, the CSV
+# summaries and the figures are committed.
+.cache_*/
+runs_*/
+graded_*/
+answer_first_rows/
+ceiling_rows/
+varloop/archive/
+varloop/logs/
+varloop/placement/
+varloop/gates/

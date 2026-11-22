@@ -62,6 +62,46 @@ class GradedSetting:
         self.rungs = rungs_from_rows(self.paths)[0]
         self.ceiling_rungs = rungs_from_rows(self._write_valid_only())[0]
         self.ncri_banks = sorted({key.split(":")[0] for key in self.rungs})
+        self.n_regraded = 0
+        self.n_regraded_unparseable = 0
+        self.answer_first_rows_by_bank = {}
+        self.answer_first_rungs = rungs_from_rows(self._write_answer_first())[0]
+
+    def _write_answer_first(self):
+        """SUPPLEMENTARY reading. A 'reasoned' row holds a bare answer in its
+        content, written before the model opened its thinking block. Here
+        that answer is graded with the repository's own grader. Every other
+        row (valid, content-CoT loops, empty) keeps its official score."""
+        directory = os.path.join(PLACEMENT_DIR, "answer_first_rows",
+                                 f"{self.setting}_d{self.draw}")
+        os.makedirs(directory, exist_ok=True)
+        paths = []
+        for path in self.paths:
+            bank = os.path.basename(path).split("__")[1].replace(".graded.jsonl", "")
+            rows = self.rows_by_bank.get(bank, [])
+            items = {}
+            if any(r.get("reason") == "reasoned" for r in rows):
+                _shots, evals = G.load_bank(bank, G.DATA)
+                items = {str(e.get("problem_number")): e for e in evals}
+            new_rows = []
+            for row in rows:
+                row = dict(row)
+                if row.get("scorable") and row.get("reason") == "reasoned":
+                    item = items[str(row["problem_number"])]
+                    result = G.grade(row.get("raw_text") or "", item, bank)
+                    row["correct"] = bool(result["is_correct"])
+                    row["answer_first_regraded"] = True
+                    self.n_regraded += 1
+                    if result["predicted"] is None:
+                        self.n_regraded_unparseable += 1
+                new_rows.append(row)
+            self.answer_first_rows_by_bank[bank] = new_rows
+            out_path = os.path.join(directory, os.path.basename(path))
+            with open(out_path, "w") as dst:
+                for row in new_rows:
+                    dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+            paths.append(out_path)
+        return paths
 
     def _write_valid_only(self):
         """Copies of the graded files holding only VALID rows, for the
@@ -139,16 +179,21 @@ class ResultsTable:
 
     def add(self, graded):
         excluded = graded.excluded_banks()
-        bases = {"place_py": (graded.rungs, graded.ceiling_rungs),
+        bases = {"place_py": (graded.rungs, graded.ceiling_rungs,
+                              graded.answer_first_rungs),
                  "a101": (drop_banks(graded.rungs, excluded),
-                          drop_banks(graded.ceiling_rungs, excluded))}
-        for basis, (rungs, ceiling_rungs) in bases.items():
+                          drop_banks(graded.ceiling_rungs, excluded),
+                          drop_banks(graded.answer_first_rungs, excluded))}
+        for basis, (rungs, ceiling_rungs, af_rungs) in bases.items():
             name = f"{graded.setting}_d{graded.draw}_{basis}"
             full = self.placer.place(rungs, name + "_all")
             subset = self.placer.place(drop_banks(rungs, SUBSET_DROP), name + "_excl")
             ceil_full = self.placer.place(ceiling_rungs, name + "_all_ceiling")
             ceil_subset = self.placer.place(drop_banks(ceiling_rungs, SUBSET_DROP),
                                             name + "_excl_ceiling")
+            af_full = self.placer.place(af_rungs, name + "_all_answer_first")
+            af_subset = self.placer.place(drop_banks(af_rungs, SUBSET_DROP),
+                                          name + "_excl_answer_first")
             self.rows.append({
                 "setting": graded.setting, "draw": graded.draw, "basis": basis,
                 "ncri_all": round(full["ncri"], 2),
@@ -159,6 +204,13 @@ class ResultsTable:
                 "ci_ceil_all": f"[{ceil_full['lo']:.2f}, {ceil_full['hi']:.2f}]",
                 "ncri_ceil_excl": round(ceil_subset["ncri"], 2),
                 "ci_ceil_excl": f"[{ceil_subset['lo']:.2f}, {ceil_subset['hi']:.2f}]",
+                # Supplementary answer-first reading (not an official NCRI).
+                "ncri_af_all": round(af_full["ncri"], 2),
+                "ci_af_all": f"[{af_full['lo']:.2f}, {af_full['hi']:.2f}]",
+                "ncri_af_excl": round(af_subset["ncri"], 2),
+                "ci_af_excl": f"[{af_subset['lo']:.2f}, {af_subset['hi']:.2f}]",
+                "af_rows_regraded": graded.n_regraded,
+                "af_rows_unparseable": graded.n_regraded_unparseable,
                 "domains_all": full["domains"], "domains_excl": subset["domains"],
                 "ranked_all": full["ranked"], "ranked_excl": subset["ranked"],
                 "invalid_pct": round(graded.invalid_percent(), 1),
@@ -188,6 +240,8 @@ class BankComparison:
         self.graded_p1 = graded_p1
         self.graded_p3 = graded_p3
         self.rng = np.random.default_rng(SEED)
+        # Separate stream, so the floor intervals stay as published.
+        self.rng_af = np.random.default_rng(SEED + 1)
 
     @staticmethod
     def correct_by_item(rows):
@@ -195,22 +249,35 @@ class BankComparison:
         return {str(r["problem_number"]): bool(r["correct"])
                 for r in rows if r.get("scorable")}
 
-    def compare(self, bank):
-        a = self.correct_by_item(self.graded_p1.rows_by_bank[bank])
-        b = self.correct_by_item(self.graded_p3.rows_by_bank[bank])
+    def paired(self, rows_p1, rows_p3, rng):
+        """Mean accuracy at each setting and a paired item-bootstrap CI of the
+        difference p3 - p1."""
+        a = self.correct_by_item(rows_p1)
+        b = self.correct_by_item(rows_p3)
         items = sorted(set(a) & set(b))
         x = np.array([a[i] for i in items], dtype=float)
         y = np.array([b[i] for i in items], dtype=float)
-        picks = self.rng.integers(0, len(items), size=(BOOTSTRAP, len(items)))
+        picks = rng.integers(0, len(items), size=(BOOTSTRAP, len(items)))
         diffs = y[picks].mean(axis=1) - x[picks].mean(axis=1)
         lo, hi = np.percentile(diffs, [2.5, 97.5])
+        return len(items), x.mean(), y.mean(), lo, hi
+
+    def compare(self, bank):
+        n, acc1, acc3, lo, hi = self.paired(self.graded_p1.rows_by_bank[bank],
+                                            self.graded_p3.rows_by_bank[bank], self.rng)
+        _n, af1, af3, af_lo, af_hi = self.paired(
+            self.graded_p1.answer_first_rows_by_bank[bank],
+            self.graded_p3.answer_first_rows_by_bank[bank], self.rng_af)
         return {
             "bank": bank,
             "kind": "ncri" if bank in self.graded_p1.ncri_banks else "knowledge",
-            "n": len(items),
-            "acc_p1": round(x.mean(), 4), "acc_p3": round(y.mean(), 4),
-            "diff": round(y.mean() - x.mean(), 4),
+            "n": n,
+            "acc_p1": round(acc1, 4), "acc_p3": round(acc3, 4),
+            "diff": round(acc3 - acc1, 4),
             "ci_lo": round(lo, 4), "ci_hi": round(hi, 4),
+            "af_p1": round(af1, 4), "af_p3": round(af3, 4),
+            "af_diff": round(af3 - af1, 4),
+            "af_ci_lo": round(af_lo, 4), "af_ci_hi": round(af_hi, 4),
             "ceil_p1": self.ceiling(self.graded_p1, bank),
             "ceil_p3": self.ceiling(self.graded_p3, bank),
             "invalid_pct_p1": round(100 * self.graded_p1.bank_summary(bank)["nonvalid_fraction"], 1),
@@ -240,15 +307,17 @@ class Figures:
             ax.spines[side].set_color(GRID)
         ax.tick_params(colors=INK_2, labelsize=9)
 
-    def fig1(self, bank_rows, path):
-        rows = sorted(bank_rows, key=lambda r: r["diff"])
+    def fig1(self, bank_rows, path, prefix="", reading="floor reading"):
+        """prefix '' plots the floor columns; 'af_' the answer-first ones."""
+        diff, lo_key, hi_key = prefix + "diff", prefix + "ci_lo", prefix + "ci_hi"
+        rows = sorted(bank_rows, key=lambda r: r[diff])
         fig, ax = plt.subplots(figsize=(8, 9), facecolor=SURFACE)
         self._style(ax)
         for i, r in enumerate(rows):
             color = ORANGE if r["bank"] in SUBSET_DROP else BLUE
-            ax.plot([r["ci_lo"], r["ci_hi"]], [i, i], color=color, lw=2,
+            ax.plot([r[lo_key], r[hi_key]], [i, i], color=color, lw=2,
                     solid_capstyle="round")
-            ax.plot(r["diff"], i, "o", ms=8, color=color, mec=SURFACE, mew=2)
+            ax.plot(r[diff], i, "o", ms=8, color=color, mec=SURFACE, mew=2)
         ax.axvline(0, color=INK_2, lw=1)
         ax.set_yticks(range(len(rows)))
         ax.set_yticklabels([f"{r['bank']}  (n={r['n']})" for r in rows], color=INK)
@@ -256,10 +325,10 @@ class Figures:
             if r["bank"] in SUBSET_DROP:
                 label.set_fontweight("bold")
         ax.grid(axis="x", color=GRID, lw=0.8)
-        ax.set_xlabel("accuracy difference, p3 − p1 (floor reading; 95% paired item bootstrap)",
-                      color=INK_2)
-        ax.set_title("Per-bank accuracy, passes=3 minus passes=1\n"
-                     "orange = recheck_v2 and recon (the excluded pair)",
+        ax.set_xlabel(f"accuracy difference, p3 − p1 ({reading})\n"
+                      "95% paired item bootstrap", color=INK_2)
+        ax.set_title(f"Per-bank accuracy, passes=3 minus passes=1\n"
+                     f"{reading}; orange = recheck_v2 and recon",
                      color=INK, fontsize=11, loc="left")
         fig.tight_layout()
         fig.savefig(path, dpi=150)
@@ -318,6 +387,8 @@ def main():
 
     figures = Figures()
     figures.fig1(bank_rows, os.path.join(OUT_DIR, "fig1.png"))
+    figures.fig1(bank_rows, os.path.join(OUT_DIR, "fig1_answer_first.png"),
+                 prefix="af_", reading="answer-first, supplementary")
     figures.fig2(results, os.path.join(OUT_DIR, "fig2.png"))
     for row in results.rows:
         print({k: v for k, v in row.items() if not k.startswith("_")})

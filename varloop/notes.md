@@ -112,6 +112,31 @@ The floor reading, p3 − p1, with a paired item bootstrap (1000 draws):
 
 The two banks the plan names are the largest and third-largest positive moves, and both intervals exclude 0. The negative moves in arithmetic and cfg come mostly from p3 thinking after the answer more often, not from wrong answers: arithmetic is 71% → 93% non-valid, cfg 0% → 71%. Per-bank non-valid % at each setting is in `banks.csv`.
 
+## Answer-first reading (SUPPLEMENTARY — not an official NCRI)
+
+**Rule.** A "reasoned" row has a bare answer in its content, written before the model opened its thinking block. So that answer is a no-CoT answer, and the answer-first reading grades it.
+- **What changes:** only rows with `reason == "reasoned"`. They are re-graded on `raw_text` with the repository's own grader (`nocot.grade.grade`).
+- **What stays:** valid rows, content-CoT rows (the p3 repetition loops), empty rows and transport rows keep their official score.
+- **Placement:** the same as the floor and ceiling, through `rungs_from_rows` and `place --rungs`, bootstrap 1000.
+- **Unchanged:** the official floor and ceiling are not modified (checked: all earlier columns of `results.csv` and `banks.csv` are byte-identical).
+- **Location:** rows under `placement/answer_first_rows/`; columns `ncri_af_*` and `af_*`; figure `fig1_answer_first.png`.
+- **Re-graded rows:** p1 496 / 509 (draws 1 / 2), of which 23 / 28 have an unparseable answer. p3 759 / 743, of which 43 / 45 are unparseable.
+
+| `place.py` basis | draw | p1 | p3 | gap, all domains | gap, excl. recheck_v2 + recon |
+|---|---|---|---|---|---|
+| answer-first | 1 | 46.5 [42.4, 50.1] | 55.4 [51.5, 58.9] | **+8.9** | **+5.0** (48.6 → 53.7) |
+| answer-first | 2 | 45.4 [40.7, 49.1] | 54.5 [50.7, 58.1] | **+9.1** | **+4.0** (48.3 → 52.4) |
+| floor (official) | 1 / 2 | | | +5.9 / +11.5 | +1.4 / +5.1 |
+| ceiling (official) | 1 / 2 | | | +11.3 / +14.6 | +6.7 / +8.2 |
+
+- **Stability.** The answer-first reading is more stable between draws than the floor. Its gap changes by 0.2 points (all domains) and 1.0 point (excl.), against 5.6 and 3.7 for the floor. The floor noise came mostly from the number of reasoned rows changing between draws (cemc at p1: 25 → 49).
+- **Gap without the two banks.** It is +4.0 to +5.0 at both draws. That is larger than the draw-to-draw change, but smaller than the width of each setting's own item interval (about ±4). No interval was computed on the gap itself.
+- **Per bank, banks other than the two where the interval excludes 0:** shortpath +0.133, o_gsm1k +0.113, textconstraint +0.087 and cfgpatch +0.062.
+  - Under the floor, these four were hidden by p3's higher invalid rate. For example, shortpath has 30 invalid rows at p3 and 0 at p1.
+  - Arithmetic is still worse at p3 (−0.108 [−0.181, −0.036]).
+  - cfg (−0.058) and brew (−0.062) are no longer significant.
+- **Reading.** The two banks are the largest per-bank gains, but the gain is not only in them. Under this reading, about half of the all-domains NCRI gap remains without them.
+
 ## Deviations from AGENTS.md and the plan
 
 1. **The SGLang serving stack is patched** (v1 + v2, above). No repo code beyond the `run.py` local-endpoint patch.

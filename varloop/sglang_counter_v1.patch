@@ -1,0 +1,20 @@
+--- /workspace/varloop_work/serving_chat.py.orig	2026-11-22 06:45:53.268111923 +0000
++++ serving_chat.py	2026-11-22 06:45:53.276111922 +0000
+@@ -1338,7 +1338,16 @@
+             session_id=request.session_id,
+             extra_key=request.extra_key,
+             cache_salt=request.cache_salt,
+-            require_reasoning=processed_messages.require_reasoning,
++            # VARLOOP PATCH: a continued assistant text prefill never opens a
++            # thinking block, so do not count its tokens as reasoning.
++            require_reasoning=processed_messages.require_reasoning
++            and not (
++                request.continue_final_message
++                and bool(request.messages)
++                and request.messages[-1].role == "assistant"
++                and isinstance(request.messages[-1].content, str)
++                and not getattr(request.messages[-1], "reasoning_content", None)
++            ),
+             priority=request.priority,
+             routing_key=self.extract_routing_key(raw_request),
+             custom_labels=custom_labels,

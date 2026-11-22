@@ -1,0 +1,149 @@
+# NCRI 15.2 — thinkingmachines/TML-d24-varloop-research, passes=1 vs passes=3
+
+Date: 2026-11-22. One model and two settings, with nothing else run.
+
+## Headline
+
+All numbers below are NCRI 15.2 display, draw 1, with a 95% item bootstrap of 1000 draws.
+The interval covers item noise only. Draw 2 is listed beside it as the serving-noise check.
+
+| basis | setting | floor, all domains | ceiling, all | floor excl. recheck_v2+recon | ceiling excl. | coverage all / excl | draw 2 floor (all / excl) |
+|---|---|---|---|---|---|---|---|
+| `place.py` as computed | p1 | **36.5** [31.6, 40.5] | 48.4 [43.9, 52.1] | **38.2** [33.1, 42.6] | 51.6 | 19/19 / 17/19 | 32.9 / 35.6 |
+| `place.py` as computed | p3 | **42.4** [37.7, 46.5] | 59.6 [55.5, 63.4] | **39.5** [34.5, 44.0] | 58.3 | 19/19 / 17/19 | 44.3 / 40.7 |
+| 0.20 cell rule applied | p1 | 36.7 [26.6, 44.6] | 37.6 | 46.1 [37.0, 53.7] | 47.2 | **9/19 / 7/19 UNRANKED** | 34.0 / 48.4 |
+| 0.20 cell rule applied | p3 | 54.6 [49.1, 59.3] | 56.4 | 51.1 [45.3, 56.4] | 53.0 | **7/19 / 5/19 UNRANKED** | 56.4 / 51.6 |
+
+How to read the table:
+
+- **Comparing the settings.** On the `place.py` basis, p3 − p1 is positive in every reading:
+
+  | gap p3 − p1 | floor, draw 1 | floor, draw 2 | ceiling, draw 1 | ceiling, draw 2 |
+  |---|---|---|---|---|
+  | all domains | +5.9 | +11.5 | +11.3 | +14.6 |
+  | excl. recheck_v2 + recon | +1.4 | +5.1 | +6.7 | +8.2 |
+
+  The floor penalises p3 more, because p3 thinks after answering more often (40.1% non-valid NCRI rows vs 25.9%). At the floor, the excl. gap at draw 1 (+1.4) is smaller than the draw-to-draw noise of one setting (p1 moved 3.6 between draws). No interval was computed on the gap itself. So the excl. gap is positive but not resolved at the floor. The all-domains gap and the ceiling gaps are larger than that noise.
+- **Why the ceiling is high.** The ceiling sits well above the floor at both settings because many rows give the answer and then keep thinking (see "Witnesses"). Never quote the ceiling alone.
+- **The 0.20 rule basis.** Under it, both settings are UNRANKED. Different domains get dropped at each setting, so its p1 and p3 numbers are not on the same item basis, and they must not be compared as a gap.
+
+## Model, loop parameter, serving stack
+
+- **Model.** `thinkingmachines/TML-d24-varloop-research`: HF snapshot, BF16, a single safetensors file plus `mtp.safetensors`.
+- **Loop parameter.** SGLang launch flag `--inkling2-loop-num-passes N`, read from `text_config.loop_config.num_passes`, which defaults to 3 with `is_varloop: true`. It is set per server:
+  - p1: `--inkling2-loop-num-passes 1`, port 30001, served as `tml-varloop@p1`.
+  - p3: `--inkling2-loop-num-passes 3` (passed explicitly), port 30002, served as `tml-varloop@p3`.
+  - The server_args in both startup logs confirm the value.
+  - `--inkling2-loop-share-cache` is off (default) on both.
+  - Speculative decoding (DSpark/MTP) is off on both.
+- **Stack.**
+  - SGLang 0.5.6.post3.dev15390+g9c64454bb, built from PR #51926 (sha 9c64454bba553e475ce7b7b790015d2f941e2807, which has SM120 kernels).
+  - torch 2.14.1+cu130.
+  - Hardware: one NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB), driver 595.112.07, on a RunPod pod.
+- **Recipe.** The SGLang cookbook's RTX PRO 6000 "Balanced" settings, saved here as `launch.sh`:
+  - `--tp 1 --ep 1 --attention-backend fa4 --dtype bfloat16 --page-size 128 --grammar-backend xgrammar --enable-multimodal --tool-call-parser inkling2`.
+  - `--reasoning-parser inkling` is left off the command line, but SGLang forces it on for this model anyway (`model_overrides/inkling.py:59`).
+  - `--mem-fraction-static` is 0.30 for p1 and 0.5 for p3, so both fit on one GPU together. It only changes KV-pool capacity, not the outputs.
+- **Request settings.** temperature 0, max_tokens 100 (16 for o_gsm1k, the runner's frozen value), prefill on, the default k-shot, and `reasoning_effort: "none"`.
+  - The chat template maps "none" to effort 0.0.
+  - Leaving the field out would give 0.9, the template default.
+
+## run.py diff
+
+`run_py.diff`, committed. With `NOCOT_API` set:
+
+- The `reasoning`, `usage` and `provider` keys are dropped from the request.
+- `reasoning_effort` is taken from `NOCOT_LOCAL_REASONING_EFFORT` (default `"none"`).
+- On a prefilled request, `continue_final_message: true` and `add_generation_prompt: false` are added.
+
+`grade.py` and `place.py` are untouched.
+
+## SGLang patches (serving stack, not the repo): `sglang_counter_v1.patch`, `sglang_counter_v2.patch`
+
+**Problem.** When the reasoning parser is on, SGLang's scheduler counts every generated token as `reasoning_tokens` until it sees the end-of-thinking tag (`schedule_batch.py:update_reasoning_tokens`). A prefilled answer never emits that tag, so a clean reply like `' 391.'` came back with reasoning_tokens 4 of 5 and empty reasoning text. W1 marked every row reasoned: the sudoku probe gave 5/5 reasoned on answer-only digits.
+
+**v1** turned that counter off for continued-text prefills. This was wrong. The model often answers and then opens a thinking block, and v1 reported 0 for those rows as well. `run.py` stores only `reasoning_text_len`, not the text, and `grade.py` re-judges rows from `reasoning_tokens` and `reasoning_text`. So the grader counted those rows as valid.
+- The first p1 run used v1. It is archived in `archive/p1_invalid_counter_v1/` (placement 45.6, floor equal to ceiling) and is not used anywhere.
+
+**v2** keeps v1 and also sets `reasoning_tokens` on continued-prefill replies to the token count of the reasoning text the parser extracted, wherever that thinking starts.
+
+**Acceptance test** (60 rows; arithmetic, cemc_hard and sudoku at both settings):
+- `reasoning_tokens > 0` matches `reasoning_text_len > 0` on 60/60 rows.
+- The grader's invalid counts equal `run.py`'s reasoned counts: 8/10/0 at p1 and 9/10/0 at p3.
+- Sudoku still reads 0.
+- Requests without a prefill still read 50 at effort none and 60 at high.
+
+## Gates
+
+| gate | result |
+|---|---|
+| G1 (latency/outputs) | 30 GSM8K questions, asked serially with the prefill and answer-only. **p1 vs p3 outputs differ on 25/30**, against 2/30 for p1 compared with itself. **Passes on outputs alone.** The latency numbers show nothing: p1's replies are 4–5 tokens, so fixed overhead dominates its seconds per token (0.0068 vs 0.0071), and the per-request medians (0.03 s vs 0.71 s) mostly reflect reply length. `gates/g1.json` |
+| G2 (GSM8K CoT, 100 items) | effort high, max 4096. **p1 95%, p3 98%** (only-p1-correct 1, only-p3-correct 4, 1 p1 truncation). The direction matches the reference (84.0 vs 88.5). Our absolute numbers are higher because the prompt and subset differ. n=100 can't separate a 3-point gap. **Pass (direction).** `gates/g2_gsm8k.json` |
+| G3 (sudoku) | The first 5-item probe per setting ran under v1, where the counter was zeroed, so the v2 acceptance rows are what count: sudoku with 10 items per setting, 10/10 rows with W1=0, W2=0, W3 false, reasoning text empty, and answer-only content. **Pass.** Rows: `gates/accept/pN/runs/` (v2) and `gates/g3/` (the v1 probe, for the record). |
+| G4 (isolation) | Model labels are `@p1` and `@p3`, and caches are separate (`.cache_p1`, `.cache_p3`). **Rows share `runs/` and `graded/` (run_all.sh, verbatim, the user's choice)**, separated by filename slug. The plan's extra pass grades into `graded/p1` and `graded/p3`. Partial; see deviations. |
+| Positive control (`gates/posctl2/`) | 5 arithmetic + 5 sudoku items at effort `xhigh` (0.99, the maximum the template accepts) vs `none`, with the prefill on. **The counter moves** (53–95 on rows where the model thinks, 0 otherwise), **but effort does not raise it reliably.** Arithmetic thinking rows went from 3 to 4 of 5 at p1 and from 4 to 3 at p3. Sudoku was 0 throughout. |
+| Two draws | Draw 2 used `--cache-salt draw2`, with 0 cache hits, identical flags and `runs_draw2/`. Floor change from draw 1 to draw 2 on the place.py basis: p1 −3.6, p3 +2.0. |
+
+## Witnesses (all 3,162 rows per setting and draw: 20 NCRI banks + 7 knowledge)
+
+| | reasoned (W1/text) | content-CoT | hidden channel | blind | status=reasoned |
+|---|---|---|---|---|---|
+| p1 draw 1 | 496 | 2 | 0 | 0 | 498 |
+| p3 draw 1 | 759 | 62 | 0 | 0 | 821 |
+| p1 draw 2 | 509 | 1 | 0 | 0 | 510 |
+| p3 draw 2 | 743 | 64 | 0 | 0 | 805 |
+
+- **What "reasoned" means here.** Two shapes appear, and both score wrong in the floor:
+  - **Thinking after the answer.** Most rows: the content is a bare answer, then the model opens a thinking block that runs to the 100-token cap (`finish_reason: length`). This accounts for 496 rows at p1 and 759 at p3.
+  - **Repetition loops (mostly p3).** All 62 p3 content-CoT rows are degenerate repetition, which the content-CoT heuristic catches: surveyor 48 (`' 257257257…'`), arithmetic 8 (`' 115115115…'`), cemc_hard 6 (`' 7, 8, 9, 10, …'`). p1 has only 2 such rows. This failure mode is separate from thinking, and almost exclusive to p3.
+- **p3 does this more often.** Non-valid share on NCRI banks: 25.9% at p1, 40.1% at p3.
+- **50-row inspection** per setting (`gates/inspect_50_*.txt`). All 100 rows have answer-only content. At p1, 8 of 50 rows have reasoning text; at p3, 14 of 50. Two p3 surveyor rows are degenerate repetition (`' 257257257…'`), which the content-CoT heuristic catches; they are loops, not reasoning.
+- **Witnessed vs blind.** Rows are WITNESSED by the pipeline's definition, and no row is blind. But the counter is a v2 count of parsed thinking text, and the positive control did not respond to effort. So the zeros are evidence that no thinking text was emitted. They are not evidence that the model ran no hidden computation, and on a looped model that may differ by pass count.
+
+## Per-bank differences (`banks.csv`, `fig1.png`)
+
+The floor reading, p3 − p1, with a paired item bootstrap (1000 draws):
+
+- **recheck_v2: +0.146 [0.083, 0.219]**
+- cemc: +0.09 [0.01, 0.17]
+- **recon: +0.082 [0.035, 0.135]**
+- arithmetic: −0.145 [−0.23, −0.07]
+- cfg: −0.135 [−0.25, −0.04]
+
+The two banks the plan names are the largest and third-largest positive moves, and both intervals exclude 0. The negative moves in arithmetic and cfg come mostly from p3 thinking after the answer more often, not from wrong answers: arithmetic is 71% → 93% non-valid, cfg 0% → 71%. Per-bank non-valid % at each setting is in `banks.csv`.
+
+## Deviations from AGENTS.md and the plan
+
+1. **The SGLang serving stack is patched** (v1 + v2, above). No repo code beyond the `run.py` local-endpoint patch.
+2. **The 0.20 cell rule conflicts with the code.** AGENTS.md §4 says cells with more than 20% non-valid rows are excluded and don't count toward coverage. `grade.py` flags them (`a101_excluded_unmeasured`), but `place.py` never reads the flag and reports 19/19 RANKED. Following the user's decision, both bases are reported. Applying the rule:
+   - p1 drops arithmetic, brew, cemc, cemc_hard, chain, hops5r2, modes, o_gsm1k, ordertrack, surveyor and symbolic, leaving 9/19.
+   - p3 drops arithmetic, brew, cemc_hard, cfg, cfgpatch, chain, modes, o_gsm1k, ordertrack, shortpath, surveyor, symbolic and textconstraint, leaving 7/19.
+   - Both are UNRANKED.
+3. **run_all.sh was run verbatim** (the user's choice), with `--cache-dir .cache_pN` passed through. Its grade and place steps hard-code `runs/`, `graded/` and `--bootstrap 400`. So:
+   - rows share `runs/`, which breaks G4's separate output dirs;
+   - `run_all.sh` also writes `placement_tml-varloop@pN.json` (bootstrap 400, with NCKI and the knowledge aggregate) at the repo root;
+   - the plan's own pass (`graded/pN`, `place --bootstrap 1000`, the `--rungs` subset) was run as an addition.
+4. **The ceiling NCRI is computed by us.** `place.py` has no conditional-valid mode, so `analyse.py` places only the valid rows (filtered copies under `placement/ceiling_rows/`) through the unchanged `rungs_from_rows` and `place`.
+5. **The positive control is mixed** (above). AGENTS.md §2 says a counter that doesn't rise makes the zeros worthless as evidence of no thinking. Read the floor as "no visible thinking text", not as proof of no reasoning.
+6. **The recipe search (§3) was not run.** The plan fixed the arm: default k-shot, prefill on, effort none, with no other models or arms. Under AGENTS.md §3 a dirty plain ask would normally trigger escalation.
+7. **The second draw does not feed the headline.** It is reported only as the serving-noise check; banks.csv and the figures use draw 1.
+8. **`run.py` sends `reasoning_effort: "none"`** in local mode. That goes beyond the plan's patch spec (drop reasoning/usage/provider, add the two prefill flags) and was the user's choice. Without it, the template defaults to 0.9.
+9. **AGENTS.md §7 items not reported here:** would-be rank, NCKI and the knowledge aggregate. They exist in the repo-root `placement_tml-varloop@pN.json` files that run_all.sh wrote (bootstrap 400). The task asked only for NCRI.
+10. **Checks run:** `nocot.place --demo` passes (run_all step 0), and `python -m nocot.tests.test_smoke` gives 48/48.
+11. **The palette was not machine-validated** (node is missing). The figures use slots 1 and 2 of the dataviz skill's reference palette.
+
+## Files
+
+- **Rows.**
+  - Raw draw 1: `runs/`. Raw draw 2: `runs_draw2/`.
+  - Graded: `graded/` (run_all), `graded/p1`, `graded/p3` and `graded_draw2/pN` (plan pass).
+  - All are kept.
+- **Placements.** `varloop/placement/*.json`, with the rung files used for each.
+- **Logs.** `varloop/logs/` (run_all, grade, report, place, draw2) and `/workspace/varloop_work/logs/` (servers).
+- **Scripts.** `gsm8k_gate.py` (G2), `g1_gate.py` (G1), `analyse.py` (results, banks, figures) and `launch.sh` (servers).
+
+## What would change these conclusions
+
+- **More draws.** The p3 − p1 gap is the size of the draw-to-draw noise (p1 moved 3.6 points between draws), so a third draw or more could move it.
+- **A serving stack that doesn't need the counter patch** (for example vLLM, if it can set the pass count).
+- **A ruling on whether `place.py` or AGENTS.md §4 governs the 0.20 rule.** That decides whether these placements are ranked at all.

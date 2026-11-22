@@ -5,6 +5,8 @@ answer-first rows of every pass count that has two draws, and writes:
 
     passes.csv  per pass count: floor, answer-first and ceiling NCRI
                 (mean of draws 1 and 2, with each draw), invalid %, shot-echo rate
+    bank_passes.csv  per bank and pass count: answer-first and floor accuracy,
+                     invalid % (draws 1 and 2 averaged)
     fig4.png    one panel per NCRI bank: bank accuracy against NCRI
 
 Usage (from the repository root):
@@ -73,6 +75,18 @@ class PassSetting:
         values = [float(self.results[d]["invalid_pct"]) for d in DRAWS]
         return float(np.mean(values))
 
+    def bank_scorable(self, bank):
+        """Number of scorable items in the bank (draw 1; the same in every draw)."""
+        return sum(1 for r in self.draws[1].official[bank] if r.get("scorable"))
+
+    def bank_invalid_percent(self, bank):
+        """Mean over draws of the bank's invalid share of scorable rows, in %."""
+        values = []
+        for d in DRAWS:
+            scorable = [r for r in self.draws[d].official[bank] if r.get("scorable")]
+            values.append(100.0 * sum(bool(r.get("invalid")) for r in scorable) / len(scorable))
+        return float(np.mean(values))
+
     def echo_rate(self, echo):
         n = n_echo = 0
         for d in DRAWS:
@@ -127,6 +141,29 @@ def write_table(settings, echo):
             "domains": s.results[1]["domains_all"],
         })
     with open(os.path.join(OUT_DIR, "passes.csv"), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+def write_bank_table(settings):
+    """bank_passes.csv: one row per bank per pass count, draws 1 and 2 averaged.
+    af_acc is the answer-first reading (supplementary); floor_acc is official."""
+    ncri_banks = {key.split(":")[0] for key in P.RUNGS}
+    rows = []
+    for bank in sorted(settings[0].draws[1].official):
+        for s in settings:
+            rows.append({
+                "bank": bank,
+                "kind": "ncri" if bank in ncri_banks else "knowledge",
+                "n": s.bank_scorable(bank),
+                "passes": s.passes,
+                "af_acc": round(s.bank_accuracy(bank, "answer_first"), 4),
+                "floor_acc": round(s.bank_accuracy(bank, "floor"), 4),
+                "invalid_pct": round(s.bank_invalid_percent(bank), 1),
+            })
+    with open(os.path.join(OUT_DIR, "bank_passes.csv"), "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
@@ -204,6 +241,8 @@ def main():
     rows = write_table(settings, ShotEcho())
     for row in rows:
         print(row)
+    bank_rows = write_bank_table(settings)
+    print(f"bank_passes.csv: {len(bank_rows)} rows")
     fig4(settings, os.path.join(OUT_DIR, "fig4.png"))
 
 
